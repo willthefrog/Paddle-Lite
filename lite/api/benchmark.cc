@@ -17,15 +17,17 @@
 #include <sys/time.h>
 #include <ctime>
 #include <cstdlib>
-#include <algorithm>
-#include <fstream>
-#include <iomanip>
+#include <cstdint>
+#include <cassert>
+#include <ctime>
 #include <numeric>
 #include <string>
 #include <vector>
-#include <iostream>
 #include <iterator>
-#include <sstream>
+#include <fstream>
+#include <iostream>
+#include <iomanip>
+#include <algorithm>
 #include "lite/api/paddle_api.h"
 #include "lite/core/device_info.h"
 #include "lite/utils/cp_logging.h"
@@ -47,15 +49,11 @@ DEFINE_string(param_filename,
               "",
               "the filename of param file, set param_file when the model is "
               "combined formate.");
-DEFINE_string(input_shape,
-              "1,3,224,224",
-              "set input shapes according to the model, "
-              "separated by colon and comma, "
-              "such as 1,3,244,244:1,3,300,300.");
-DEFINE_string(input_path,
-              "",
-              "path of input files, "
-              "separated by colons, such as input1_file:input2_file");
+DEFINE_bool(run_model_optimize,
+            false,
+            "if set true, apply model_optimize_tool to "
+            "model and use optimized model to test. ");
+DEFINE_string(input_file, "", "path to input file");
 DEFINE_int32(warmup, 5, "warmup times");
 DEFINE_int32(repeats, 20, "repeats times");
 DEFINE_int32(power_mode,
@@ -71,9 +69,6 @@ DEFINE_bool(is_quantized_model,
             "if set true, "
             "test the performance of the quantized model. ");
 
-using shape_list = std::vector<std::vector<size_t>>;
-using string_list = std::vector<std::string>;
-
 namespace paddle {
 namespace lite_api {
 
@@ -81,6 +76,13 @@ inline double GetCurrentUS() {
   struct timeval time;
   gettimeofday(&time, NULL);
   return 1e+6 * time.tv_sec + time.tv_usec;
+}
+
+template <typename T>
+inline T prod(std::vector<T> input)
+{
+  return std::accumulate(
+    input.begin(), input.end(), 1, std::multiplies<T>());
 }
 
 void OutputOptModel(const std::string& save_optimized_model_dir) {
@@ -117,10 +119,8 @@ int64_t ShapeProduction(const std::vector<int64_t>& shape) {
 }
 
 #ifdef LITE_WITH_LIGHT_WEIGHT_FRAMEWORK
-void Run(::shape_list& input_shapes,
-         ::string_list& input_files,
-         const std::string& model_dir,
-         const std::string model_name) {
+void Run(const std::string& model_dir,
+         const std::string& input_file) {
   // set config and create predictor
   lite_api::MobileConfig config;
   config.set_threads(FLAGS_threads);
@@ -128,28 +128,37 @@ void Run(::shape_list& input_shapes,
   config.set_model_from_file(model_path);
 
   auto predictor = lite_api::CreatePaddlePredictor(config);
+  auto input_names = predictor->GetInputNames();
+  auto output_names = predictor->GetOutputNames();
+
+  int64_t num_inputs = 0;
+  std::ifstream fin(input_file, std::ios::binary);
+  if (!fin.is_open()) {
+    LOG(FATAL) << "open input file " << input_file << " error.";
+  }
+  fin.read(reinterpret_cast<char*>(&num_inputs), sizeof(int64_t));
+  assert(num_inputs == input_names.size() && "invalid number of inputs");
 
   // set input
-  for (size_t i = 0; i < input_shapes.size(); i++) {
+  for (size_t i = 0; i < num_inputs; i++) {
+    std::cout << "read input for " << input_names[i] << "\n";
     auto input_tensor = predictor->GetInput(i);
-    auto dim = input_shapes[i];
-    input_tensor->Resize(dim);
-    auto input_data = input_tensor->mutable_data<float>();
-    auto numel = std::accumulate(
-      dim.begin(), dim.end(), 1, std::multiplies<size_t>());
+    int64_t num_dims = 0;
+    fin.read(reinterpret_cast<char*>(&num_dims), sizeof(int64_t));
 
-    std::ifstream fin(input_files[i], ios::binary | ios::ate);
-    if (!fin.is_open()) {
-      LOG(FATAL) << "open input image " << input_files[i] << " error.";
+    std::vector<int64_t> shape(num_dims);
+    int64_t tmp;
+    for (size_t j = 0; j < num_dims; j++) {
+        fin.read(reinterpret_cast<char*>(&tmp), sizeof(int64_t));
+        shape[j] = tmp;
     }
-    if (fin.tellg() != numel) {
-      LOG(FATAL) << "size not matching shape: " << input_files[i];
-    }
-    fin.seekg(0);
-    float f;
-    while (fin.read(reinterpret_cast<char*>(&f), sizeof(float)))
-        input_data[j] = f;
+
+    input_tensor->Resize(shape);
+    auto input_data = input_tensor->mutable_data<float>();
+    fin.read(reinterpret_cast<char*>(input_data),
+             sizeof(float) * prod(input_tensor->shape()));
   }
+
   // warmup
   for (int i = 0; i < FLAGS_warmup; ++i) {
     predictor->Run();
@@ -166,65 +175,49 @@ void Run(::shape_list& input_shapes,
   std::sort(perf_vct.begin(), perf_vct.end());
   float min_res = perf_vct.back();
   float max_res = perf_vct.front();
-  float total_res = accumulate(perf_vct.begin(), perf_vct.end(), 0.0);
+  float total_res = std::accumulate(perf_vct.begin(), perf_vct.end(), 0.0);
   float avg_res = total_res / FLAGS_repeats;
 
   // print result
   std::setprecision(5);
-  std::cout << std::setw(30) << std::fixed << std::left << model_name << " ";
+  std::cout << std::setw(30) << std::fixed << std::left << model_dir << " ";
   std::cout << "min = " << std::setw(12) << min_res;
   std::cout << "max = " << std::setw(12) << max_res;
   std::cout << "average = " << std::setw(12) << avg_res;
   std::cout << "\n";
+
+
+  for (size_t i = 0; i < output_names.size(); i++) {
+    auto output_tensor = predictor->GetOutput(0);
+    std::cout << output_names[i] << " shape is: [";
+    auto shape = output_tensor->shape();
+    for (size_t d = 0; d < shape.size(); d++) {
+      std::cout << shape[d];
+      if (d != shape.size() - 1) {
+        std::cout << ", ";
+      }
+    }
+    std::cout << "]\n";
+    auto numel = prod(output_tensor->shape());
+    std::cout << "data is \n[";
+    for (size_t j = 0; j < numel; j++) {
+      std::cout << output_tensor->mutable_data<float>()[j] << " ";
+      if (j != numel - 1) {
+        std::cout << ", ";
+      }
+    }
+    std::cout << "]\n";
+  }
 }
 #endif
 
 }  // namespace lite_api
 }  // namespace paddle
 
-template <char delim>
-class string_segment : public std::string {};
-
-template <char delim>
-std::istream& operator>>(std::istream& is, comma_segment& output)
-{
-  std::getline(is, output, delim);
-  return is;
-}
-
-template <typename T>
-string_list split_string(std::string& input)
-{
-  std::istringstream iss(input);
-  string_list results(
-    std::istream_iterator<T>{iss},
-    std::istream_iterator<T>());
-  return results;
-}
-
-shape_list parse_input_shapes(std::string& input_shapes)
-{
-  string_list shape_strings = split_string<string_segment<':'>>(input_shapes);
-  shape_list results(shape_strings.size());
-  std::transform(shape_strings.begin(), shape_strings.end(), results.begin(),
-                 [](std::string& input) -> std::vector<size_t> {
-                   auto dim_strings = split_string<string_segment<','>>(input);
-                   std::vector<size_t> dims(dim_strings.size());
-                   std::transform(
-                     dim_strings.begin(), dim_strings.end(), dims.begin(),
-                     [](std::string& dim_s) -> std::size_t {
-                       return std::atoi(dim_s.data());
-                     }
-                     );
-                   return dims;
-                 });
-  return results;
-}
-
 int main(int argc, char** argv) {
   // Check inputs
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  if (FLAGS_model_dir == "") {
+  if (FLAGS_model_dir == "" || FLAGS_input_file == "") {
     LOG(INFO) << "please run ./benchmark_bin --help to obtain usage.";
     exit(0);
   }
@@ -232,15 +225,18 @@ int main(int argc, char** argv) {
   if (FLAGS_model_dir.back() == '/') {
     FLAGS_model_dir.pop_back();
   }
-  std::size_t found = FLAGS_model_dir.find_last_of("/");
-  std::string model_name = FLAGS_model_dir.substr(found + 1);
 
-  shape_list input_shapes = parse_input_shapes(FLAGS_input_shape);
-  string_list input_files = split_string<string_segment<':'>>(FLAGS_input_path);
+  std::string save_optimized_model_dir = FLAGS_model_dir + "_opt2";
+  // Output optimized model if needed
+  if (FLAGS_run_model_optimize) {
+    paddle::lite_api::OutputOptModel(save_optimized_model_dir);
+  }
 
 #ifdef LITE_WITH_LIGHT_WEIGHT_FRAMEWORK
   // Run inference using optimized model
-  paddle::lite_api::Run(input_shapes, input_files, run_model_dir, model_name);
+  std::string run_model_dir =
+      FLAGS_run_model_optimize ? save_optimized_model_dir : FLAGS_model_dir;
+  paddle::lite_api::Run(run_model_dir, FLAGS_input_file);
 #endif
   return 0;
 }
