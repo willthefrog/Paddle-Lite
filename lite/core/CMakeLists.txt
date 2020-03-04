@@ -38,7 +38,7 @@ endif()
 
 #-------------------------------------------- GET CODE META INFO ------------------------------------------
 execute_process(
-  COMMAND git describe --tags --exact-match
+  COMMAND git describe --always
   WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
   OUTPUT_VARIABLE PADDLE_LITE_TAG
   OUTPUT_STRIP_TRAILING_WHITESPACE
