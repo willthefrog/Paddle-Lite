@@ -40,6 +40,9 @@ DEFINE_string(model_dir,
               "",
               "the path of the model, the model and param files is under "
               "model_dir.");
+DEFINE_string(model_path,
+              "",
+              "model file path.");
 DEFINE_string(model_filename,
               "",
               "the filename of model file. When the model is combined formate, "
@@ -118,7 +121,7 @@ int64_t ShapeProduction(const std::vector<int64_t>& shape) {
 }
 
 #ifdef LITE_WITH_LIGHT_WEIGHT_FRAMEWORK
-void Run(const std::string& model_dir,
+void Run(const std::string& model_path,
          const std::string& input_file) {
   // set config and create predictor
   lite_api::MobileConfig config;
@@ -179,7 +182,7 @@ void Run(const std::string& model_dir,
 
   // print result
   std::setprecision(5);
-  std::cout << std::setw(30) << std::fixed << std::left << model_dir << " ";
+  std::cout << std::setw(30) << std::fixed << std::left << model_path << " ";
   std::cout << "min = " << std::setw(12) << min_res;
   std::cout << "max = " << std::setw(12) << max_res;
   std::cout << "average = " << std::setw(12) << avg_res;
@@ -216,7 +219,7 @@ void Run(const std::string& model_dir,
 int main(int argc, char** argv) {
   // Check inputs
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  if (FLAGS_model_dir == "" || FLAGS_input_file == "") {
+  if (FLAGS_model_path == "" || FLAGS_input_file == "") {
     LOG(INFO) << "please run ./benchmark_bin --help to obtain usage.";
     exit(0);
   }
@@ -233,9 +236,7 @@ int main(int argc, char** argv) {
 
 #ifdef LITE_WITH_LIGHT_WEIGHT_FRAMEWORK
   // Run inference using optimized model
-  std::string run_model_dir =
-      FLAGS_run_model_optimize ? save_optimized_model_dir : FLAGS_model_dir;
-  paddle::lite_api::Run(run_model_dir, FLAGS_input_file);
+  paddle::lite_api::Run(FLAGS_model_path, FLAGS_input_file);
 #endif
   return 0;
 }
