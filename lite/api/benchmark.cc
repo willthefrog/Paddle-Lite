@@ -13,7 +13,6 @@
 // limitations under the License.
 
 #include <gflags/gflags.h>
-#if !defined(_WIN32)
 #include <sys/time.h>
 #include <ctime>
 #include <cstdlib>
